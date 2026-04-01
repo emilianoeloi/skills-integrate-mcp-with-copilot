@@ -5,9 +5,12 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from typing import Literal
+
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel
 import os
 from pathlib import Path
 
@@ -78,6 +81,44 @@ activities = {
 }
 
 
+Role = Literal["student", "organizer", "admin"]
+VALID_ROLES = {"student", "organizer", "admin"}
+
+
+class ActivityCreate(BaseModel):
+    name: str
+    description: str
+    schedule: str
+    max_participants: int
+
+
+class ActivityUpdate(BaseModel):
+    description: str | None = None
+    schedule: str | None = None
+    max_participants: int | None = None
+
+
+def get_current_role(x_user_role: str | None = Header(default=None, alias="X-User-Role")) -> Role:
+    """Read role from header for a lightweight auth simulation."""
+    if x_user_role is None:
+        return "student"
+
+    role = x_user_role.strip().lower()
+    if role not in VALID_ROLES:
+        raise HTTPException(status_code=401, detail="Invalid role in X-User-Role header")
+
+    return role
+
+
+def require_role(*allowed_roles: Role):
+    def _dependency(role: Role = Depends(get_current_role)) -> Role:
+        if role not in allowed_roles:
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        return role
+
+    return _dependency
+
+
 @app.get("/")
 def root():
     return RedirectResponse(url="/static/index.html")
@@ -86,6 +127,76 @@ def root():
 @app.get("/activities")
 def get_activities():
     return activities
+
+
+@app.post("/activities")
+def create_activity(
+    activity: ActivityCreate,
+    _: Role = Depends(require_role("organizer", "admin")),
+):
+    """Create a new activity (organizer/admin only)."""
+    activity_name = activity.name.strip()
+    if not activity_name:
+        raise HTTPException(status_code=400, detail="Activity name cannot be empty")
+
+    if activity.max_participants <= 0:
+        raise HTTPException(status_code=400, detail="max_participants must be greater than 0")
+
+    if activity_name in activities:
+        raise HTTPException(status_code=400, detail="Activity already exists")
+
+    activities[activity_name] = {
+        "description": activity.description,
+        "schedule": activity.schedule,
+        "max_participants": activity.max_participants,
+        "participants": []
+    }
+
+    return {"message": f"Created activity {activity_name}", "activity": activities[activity_name]}
+
+
+@app.patch("/activities/{activity_name}")
+def update_activity(
+    activity_name: str,
+    activity_update: ActivityUpdate,
+    _: Role = Depends(require_role("organizer", "admin")),
+):
+    """Update an existing activity (organizer/admin only)."""
+    if activity_name not in activities:
+        raise HTTPException(status_code=404, detail="Activity not found")
+
+    activity = activities[activity_name]
+
+    if activity_update.description is not None:
+        activity["description"] = activity_update.description
+
+    if activity_update.schedule is not None:
+        activity["schedule"] = activity_update.schedule
+
+    if activity_update.max_participants is not None:
+        if activity_update.max_participants < len(activity["participants"]):
+            raise HTTPException(
+                status_code=400,
+                detail="max_participants cannot be below current participant count"
+            )
+        if activity_update.max_participants <= 0:
+            raise HTTPException(status_code=400, detail="max_participants must be greater than 0")
+        activity["max_participants"] = activity_update.max_participants
+
+    return {"message": f"Updated {activity_name}", "activity": activity}
+
+
+@app.delete("/activities/{activity_name}")
+def delete_activity(
+    activity_name: str,
+    _: Role = Depends(require_role("organizer", "admin")),
+):
+    """Delete an existing activity (organizer/admin only)."""
+    if activity_name not in activities:
+        raise HTTPException(status_code=404, detail="Activity not found")
+
+    del activities[activity_name]
+    return {"message": f"Deleted {activity_name}"}
 
 
 @app.post("/activities/{activity_name}/signup")
